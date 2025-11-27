@@ -167,10 +167,15 @@ impl DialogLayer {
         }
         id.to_tag = make_tag().to_string(); // generate to tag
 
+        // Get the actual address where we received this request from.
+        // This is critical for sending in-dialog requests back to the correct endpoint.
+        let received_addr = tx.connection.as_ref().map(|c| c.get_addr().clone());
+
         let dlg_inner = DialogInner::new(
             TransactionRole::Server,
             id.clone(),
             tx.original.clone(),
+            received_addr,
             self.endpoint.clone(),
             state_sender,
             credential,

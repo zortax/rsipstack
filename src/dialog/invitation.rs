@@ -476,6 +476,7 @@ impl DialogLayer {
             TransactionRole::Client,
             id.clone(),
             request.clone(),
+            None, // Client dialogs don't have a received address yet
             self.endpoint.clone(),
             state_sender,
             opt.credential,

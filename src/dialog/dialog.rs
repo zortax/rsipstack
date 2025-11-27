@@ -185,6 +185,12 @@ pub struct DialogInner {
     pub credential: Option<Credential>,
     pub route_set: Mutex<Vec<Route>>,
 
+    /// The actual destination address where we received the initial request from.
+    /// This is used for sending in-dialog requests back to the originating endpoint,
+    /// regardless of what Contact headers or Route headers say. Critical for NAT
+    /// and when dealing with SIP providers that use internal addresses in headers.
+    pub(super) initial_received_addr: Option<SipAddr>,
+
     pub(super) endpoint_inner: EndpointInnerRef,
     pub(super) state_sender: DialogStateSender,
     pub(super) tu_sender: TransactionEventSender,
@@ -233,6 +239,7 @@ impl DialogInner {
         role: TransactionRole,
         id: DialogId,
         initial_request: Request,
+        initial_received_addr: Option<SipAddr>,
         endpoint_inner: EndpointInnerRef,
         state_sender: DialogStateSender,
         credential: Option<Credential>,
@@ -241,12 +248,36 @@ impl DialogInner {
     ) -> Result<Self> {
         let cseq = initial_request.cseq_header()?.seq()?;
 
-        let remote_uri = match role {
+        let mut remote_uri = match role {
             TransactionRole::Client => initial_request.uri.clone(),
             TransactionRole::Server => {
                 extract_uri_from_contact(initial_request.contact_header()?.value())?
             }
         };
+
+        // For server dialogs, ensure the remote URI has a transport parameter
+        // matching the transport used in the initial INVITE. This is critical
+        // for in-dialog requests to use the correct transport (especially TCP).
+        if role == TransactionRole::Server {
+            // Check if remote_uri already has a transport parameter
+            let has_transport = remote_uri
+                .params
+                .iter()
+                .any(|p| matches!(p, Param::Transport(_)));
+
+            if !has_transport {
+                // Get transport from the initial INVITE's Via header
+                if let Ok(via) = initial_request.via_header() {
+                    if let Ok(typed_via) = via.typed() {
+                        let transport = typed_via.transport;
+                        // Only add non-UDP transports (UDP is default)
+                        if transport != rsip::Transport::Udp {
+                            remote_uri.params.push(Param::Transport(transport));
+                        }
+                    }
+                }
+            }
+        }
 
         let from = initial_request.from_header()?.typed()?;
         let mut to = initial_request.to_header()?.typed()?;
@@ -277,6 +308,7 @@ impl DialogInner {
             remote_seq: AtomicU32::new(0),
             credential,
             route_set: Mutex::new(route_set),
+            initial_received_addr,
             endpoint_inner,
             state_sender,
             tu_sender,
@@ -481,6 +513,18 @@ impl DialogInner {
 
     pub(super) fn build_vias_from_request(&self) -> Result<Vec<Via>> {
         let mut vias = vec![];
+
+        // For server dialogs (UAS), when sending requests, we should create
+        // our own Via header, not copy from the initial INVITE we received.
+        // The Via from initial_request contains the UAC's address, but we need
+        // our own address where we expect responses to be sent.
+        if self.role == TransactionRole::Server {
+            let via = self.endpoint_inner.get_via(None, None)?;
+            vias.push(via);
+            return Ok(vias);
+        }
+
+        // For client dialogs, we can reuse the Via from our initial request
         for header in self.initial_request.headers.iter() {
             if let Header::Via(via) = header {
                 if let Ok(mut typed_via) = via.typed() {
@@ -664,10 +708,23 @@ impl DialogInner {
         let key = TransactionKey::from_request(&request, TransactionRole::Client)?;
         let mut tx = Transaction::new_client(key, request, self.endpoint_inner.clone(), None);
 
-        if let Some(route) = tx.original.route_header() {
-            if let Some(first_route) = route.typed().ok().and_then(|r| r.uris().first().cloned()) {
-                tx.destination = SipAddr::try_from(&first_route.uri).ok();
-            }
+        // For in-dialog requests, ALWAYS use the actual address where we received
+        // the initial request, not what Contact/Route headers say. This is critical
+        // for NAT traversal and when SIP providers use internal addresses in headers.
+        //
+        // RFC 3261 requires:
+        // - For reliable transports (TCP/TLS): Reuse the existing connection
+        // - For unreliable transports (UDP): Send to the source address of the initial request
+        //
+        // The transport layer will handle connection reuse for TCP based on the destination.
+        if let Some(addr) = &self.initial_received_addr {
+            info!(
+                id = self.id.lock().unwrap().to_string(),
+                method = %method,
+                destination = %addr,
+                "using initial received address for in-dialog request"
+            );
+            tx.destination = Some(addr.clone());
         }
         match tx.send().await {
             Ok(_) => {

@@ -529,6 +529,71 @@ impl ServerInviteDialog {
         self.inner.do_request(request.clone()).await
     }
 
+    /// Send a REFER request to transfer the call
+    ///
+    /// Sends a REFER request within an established dialog to transfer the call
+    /// to another destination. This implements RFC 3515 (SIP REFER method) and
+    /// is commonly used for attended or unattended call transfers.
+    ///
+    /// The method automatically constructs the Refer-To header with the provided
+    /// target URI. This can only be called for confirmed dialogs.
+    ///
+    /// # Parameters
+    ///
+    /// * `refer_to` - The SIP URI to transfer the call to (e.g., "sip:alice@example.com")
+    /// * `headers` - Optional additional headers to include (e.g., Referred-By)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(Response))` - Response to the REFER request
+    /// * `Ok(None)` - Dialog not confirmed, no request sent
+    /// * `Err(Error)` - Failed to send REFER
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use rsipstack::dialog::server_dialog::ServerInviteDialog;
+    /// # async fn example() -> rsipstack::Result<()> {
+    /// # let dialog: ServerInviteDialog = todo!();
+    /// // Simple call transfer
+    /// dialog.refer("sip:alice@example.com", None).await?;
+    ///
+    /// // Transfer with Referred-By header
+    /// let headers = vec![
+    ///     rsip::Header::Other("Referred-By".into(), "sip:bob@example.com".into())
+    /// ];
+    /// dialog.refer("sip:alice@example.com", Some(headers)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn refer(
+        &self,
+        refer_to: &str,
+        headers: Option<Vec<rsip::Header>>,
+    ) -> Result<Option<rsip::Response>> {
+        if !self.inner.is_confirmed() {
+            return Ok(None);
+        }
+        info!(id=%self.id(), refer_to=%refer_to, "sending REFER request");
+
+        // Construct Refer-To header
+        let refer_to_header = rsip::Header::Other("Refer-To".into(), refer_to.into());
+
+        // Combine with any additional headers
+        let mut final_headers = headers.unwrap_or_default();
+        final_headers.push(refer_to_header);
+
+        let request = self.inner.make_request_with_vias(
+            rsip::Method::Refer,
+            None,
+            self.inner.build_vias_from_request()?,
+            Some(final_headers),
+            None,
+        )?;
+
+        self.inner.do_request(request.clone()).await
+    }
+
     /// Handle incoming transaction for this dialog
     ///
     /// Processes incoming SIP requests that are routed to this dialog.
@@ -602,6 +667,7 @@ impl ServerInviteDialog {
                 rsip::Method::Bye => return self.handle_bye(tx).await,
                 rsip::Method::PRack => return self.handle_prack(tx).await,
                 rsip::Method::Info => return self.handle_info(tx).await,
+                rsip::Method::Notify => return self.handle_notify(tx).await,
                 rsip::Method::Options => return self.handle_options(tx).await,
                 rsip::Method::Update => return self.handle_update(tx).await,
                 _ => {
@@ -641,6 +707,14 @@ impl ServerInviteDialog {
         info!(id = %self.id(), "received info {}", tx.original.uri);
         self.inner
             .transition(DialogState::Info(self.id(), tx.original.clone()))?;
+        tx.reply(rsip::StatusCode::OK).await?;
+        Ok(())
+    }
+
+    async fn handle_notify(&mut self, tx: &mut Transaction) -> Result<()> {
+        info!(id = %self.id(), "received notify {}", tx.original.uri);
+        self.inner
+            .transition(DialogState::Notify(self.id(), tx.original.clone()))?;
         tx.reply(rsip::StatusCode::OK).await?;
         Ok(())
     }
