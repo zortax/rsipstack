@@ -249,7 +249,17 @@ impl DialogLayer {
         }
         .with_tag(make_tag());
 
-        let via = self.endpoint.get_via(None, None)?;
+        // Select the local listener matching the destination's transport type
+        // so the Via header reflects the actual transport (e.g. TLS, not TCP).
+        let via_addr = opt.destination.as_ref().and_then(|dest| {
+            let target_transport = dest.r#type?;
+            self.endpoint
+                .transport_layer
+                .get_addrs()
+                .into_iter()
+                .find(|addr| addr.r#type == Some(target_transport))
+        });
+        let via = self.endpoint.get_via(via_addr, None)?;
         let mut request =
             self.endpoint
                 .make_request(rsip::Method::Invite, recipient, via, from, to, last_seq);
