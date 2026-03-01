@@ -147,6 +147,18 @@ impl ClientInviteDialog {
     /// # }
     /// ```
     pub async fn bye(&self) -> Result<()> {
+        self.bye_to(None).await
+    }
+
+    /// Send a BYE request to terminate the dialog, optionally overriding
+    /// the destination address.
+    ///
+    /// When `destination` is `Some`, the BYE is sent to that address instead of
+    /// the remote target derived from the dialog's Contact header.  This is
+    /// needed when the Contact header points to an address that is not directly
+    /// reachable (e.g. a load-balancer or registrar VIP) and the device should
+    /// be reached via its registration address / existing connection.
+    pub async fn bye_to(&self, destination: Option<crate::transport::SipAddr>) -> Result<()> {
         if !self.inner.is_confirmed() {
             return Ok(());
         }
@@ -154,7 +166,7 @@ impl ClientInviteDialog {
             .inner
             .make_request(rsip::Method::Bye, None, None, None, None, None)?;
 
-        match self.inner.do_request(request).await {
+        match self.inner.do_request_to(request, destination).await {
             Ok(_) => {}
             Err(e) => {
                 info!("bye error: {}", e);

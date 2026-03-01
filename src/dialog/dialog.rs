@@ -703,21 +703,28 @@ impl DialogInner {
         }
     }
 
-    async fn send_dialog_request(&self, request: Request) -> Result<Option<Response>> {
+    async fn send_dialog_request(
+        &self,
+        request: Request,
+        destination_override: Option<SipAddr>,
+    ) -> Result<Option<Response>> {
         let method = request.method().to_owned();
         let key = TransactionKey::from_request(&request, TransactionRole::Client)?;
         let mut tx = Transaction::new_client(key, request, self.endpoint_inner.clone(), None);
 
-        // For in-dialog requests, ALWAYS use the actual address where we received
-        // the initial request, not what Contact/Route headers say. This is critical
-        // for NAT traversal and when SIP providers use internal addresses in headers.
-        //
-        // RFC 3261 requires:
-        // - For reliable transports (TCP/TLS): Reuse the existing connection
-        // - For unreliable transports (UDP): Send to the source address of the initial request
-        //
-        // The transport layer will handle connection reuse for TCP based on the destination.
-        if let Some(addr) = &self.initial_received_addr {
+        // Destination resolution priority:
+        // 1. Explicit override (caller knows the correct destination, e.g. registration address)
+        // 2. initial_received_addr (for server dialogs — the address that sent us the INVITE)
+        // 3. Transport-layer resolution from the request URI (default)
+        if let Some(addr) = destination_override {
+            info!(
+                id = self.id.lock().unwrap().to_string(),
+                method = %method,
+                destination = %addr,
+                "using explicit destination override for in-dialog request"
+            );
+            tx.destination = Some(addr);
+        } else if let Some(addr) = &self.initial_received_addr {
             info!(
                 id = self.id.lock().unwrap().to_string(),
                 method = %method,
@@ -819,7 +826,22 @@ impl DialogInner {
     }
 
     pub(super) async fn do_request(&self, request: Request) -> Result<Option<Response>> {
-        self.send_dialog_request(request).await
+        self.send_dialog_request(request, None).await
+    }
+
+    /// Like `do_request`, but allows overriding the destination address.
+    ///
+    /// When `destination` is `Some`, it takes priority over `initial_received_addr`
+    /// and the default transport-layer resolution.  This is needed for client
+    /// dialogs where the remote Contact header points to an address that is not
+    /// directly reachable (e.g. a load-balancer VIP), while the device is only
+    /// reachable on its existing connection identified by the registration address.
+    pub(super) async fn do_request_to(
+        &self,
+        request: Request,
+        destination: Option<SipAddr>,
+    ) -> Result<Option<Response>> {
+        self.send_dialog_request(request, destination).await
     }
 
     pub(super) fn transition(&self, state: DialogState) -> Result<()> {
