@@ -519,7 +519,8 @@ impl DialogInner {
         // The Via from initial_request contains the UAC's address, but we need
         // our own address where we expect responses to be sent.
         if self.role == TransactionRole::Server {
-            let via = self.endpoint_inner.get_via(None, None)?;
+            let via_addr = self.via_addr_for_transport();
+            let via = self.endpoint_inner.get_via(via_addr, None)?;
             vias.push(via);
             return Ok(vias);
         }
@@ -538,9 +539,26 @@ impl DialogInner {
                 }
             }
         }
-        let via = self.endpoint_inner.get_via(None, None)?;
+        let via_addr = self.via_addr_for_transport();
+        let via = self.endpoint_inner.get_via(via_addr, None)?;
         vias.push(via);
         Ok(vias)
+    }
+
+    /// Find the local listener address matching the dialog's transport.
+    ///
+    /// Uses `initial_received_addr` (for server dialogs) to determine which
+    /// transport (TCP, TLS, etc.) the peer connected over, then returns the
+    /// matching local listener so the Via header reflects the correct transport.
+    fn via_addr_for_transport(&self) -> Option<SipAddr> {
+        self.initial_received_addr.as_ref().and_then(|addr| {
+            let target_transport = addr.r#type?;
+            self.endpoint_inner
+                .transport_layer
+                .get_addrs()
+                .into_iter()
+                .find(|a| a.r#type == Some(target_transport))
+        })
     }
 
     pub(super) fn make_request_with_vias(
