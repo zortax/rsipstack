@@ -248,36 +248,12 @@ impl DialogInner {
     ) -> Result<Self> {
         let cseq = initial_request.cseq_header()?.seq()?;
 
-        let mut remote_uri = match role {
+        let remote_uri = match role {
             TransactionRole::Client => initial_request.uri.clone(),
             TransactionRole::Server => {
                 extract_uri_from_contact(initial_request.contact_header()?.value())?
             }
         };
-
-        // For server dialogs, ensure the remote URI has a transport parameter
-        // matching the transport used in the initial INVITE. This is critical
-        // for in-dialog requests to use the correct transport (especially TCP).
-        if role == TransactionRole::Server {
-            // Check if remote_uri already has a transport parameter
-            let has_transport = remote_uri
-                .params
-                .iter()
-                .any(|p| matches!(p, Param::Transport(_)));
-
-            if !has_transport {
-                // Get transport from the initial INVITE's Via header
-                if let Ok(via) = initial_request.via_header() {
-                    if let Ok(typed_via) = via.typed() {
-                        let transport = typed_via.transport;
-                        // Only add non-UDP transports (UDP is default)
-                        if transport != rsip::Transport::Udp {
-                            remote_uri.params.push(Param::Transport(transport));
-                        }
-                    }
-                }
-            }
-        }
 
         let from = initial_request.from_header()?.typed()?;
         let mut to = initial_request.to_header()?.typed()?;
